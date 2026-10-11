@@ -1,0 +1,13 @@
+# Pliki tymczasowe i logi
+*.log
+*.tmp
+*.swp
+*~
+
+# Pliki systemowe
+.DS_Store
+Thumbs.db
+
+# Wirtualne srodowiska i archiwa
+*.tar.gz
+*.zip
