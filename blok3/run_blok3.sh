@@ -1,5 +1,9 @@
 #!/bin/bash
 
+gunzip -c GCA_*_genomic.fna.gz > genome.fa
+mkdir -p data/ref
+mv genome.fa data/ref/
+
 # Punkt 7: Ekstrakcja sond do formatu FASTA
 awk -F',' 'NR>=6 && (NR-6)%2==0 { print ">"$1"\n"$2}' DArT_SNP.csv > probes.fa
 
