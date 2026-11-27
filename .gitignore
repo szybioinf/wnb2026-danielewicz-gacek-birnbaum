@@ -11,3 +11,12 @@ Thumbs.db
 # Wirtualne srodowiska i archiwa
 *.tar.gz
 *.zip
+
+# Snakemake, wyniki i duze dane
+projekt/results/
+projekt/.snakemake/
+projekt/logs/
+projekt/data/dart/*
+!projekt/data/dart/.gitkeep
+projekt/data/ref/*
+!projekt/data/ref/.gitkeep

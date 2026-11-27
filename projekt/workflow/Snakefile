@@ -1,0 +1,160 @@
+configfile: "config/config.yaml"
+
+OUT = config["output_dir"]
+
+rule all:
+    input:
+        f"{OUT}/01_extract/probes.fa",
+        f"{OUT}/01_extract/dart_info_oneline.tsv",
+        f"{OUT}/02_blast/blast_raw.tsv",
+        f"{OUT}/03_variant/dart_genotypes.tsv",
+        # f"{OUT}/03_variant/step2_core_rc.tsv",  # odkomentuj po dodaniu etapow 3 i 4
+
+# --- ETAP 1: Ekstrakcja sond i opisow SNP ---
+rule extract_probes:
+    input:
+        csv = config["dart_csv"]
+    output:
+        f"{OUT}/01_extract/probes.fa"
+    params:
+        first = config["dart_data_start_row"],
+        id_col = config["dart_id_col"],
+        seq_col = config["dart_seq_col"]
+    shell:
+        """
+        mkdir -p $(dirname {output})
+        awk -F',' 'NR>={params.first} && (NR-{params.first})%2==0 {{ print ">"${params.id_col}; print ${params.seq_col} }}' {input.csv} > {output}
+        """
+
+rule extract_snp_info:
+    input:
+        csv = config["dart_csv"]
+    output:
+        f"{OUT}/01_extract/dart_info_oneline.tsv"
+    params:
+        first = config["dart_data_start_row"] + 1,
+        id_col = config["dart_id_col"],
+        snp_col = config["dart_snp_col"]
+    shell:
+        """
+        mkdir -p $(dirname {output})
+        awk -F',' -v OFS='\\t' 'NR>={params.first} && (NR-{params.first})%2==0 {{ print ${params.id_col}, ${params.snp_col} }}' {input.csv} > {output}
+        """
+
+# --- ETAP 2: Baza BLAST i mapowanie sond ---
+rule makeblastdb:
+    input:
+        fasta = config["genome_fasta"]
+    output:
+        f"{OUT}/02_blast/db/genome.nsq"
+    params:
+        prefix = f"{OUT}/02_blast/db/genome"
+    conda:
+        "envs/blast.yaml"
+    log:
+        "logs/makeblastdb.log"
+    shell:
+        """
+        mkdir -p $(dirname {params.prefix}) logs
+        makeblastdb -in {input.fasta} -dbtype nucl -out {params.prefix} > {log} 2>&1
+        """
+
+rule blastn:
+    input:
+        query = f"{OUT}/01_extract/probes.fa",
+        db = f"{OUT}/02_blast/db/genome.nsq"
+    output:
+        f"{OUT}/02_blast/blast_raw.tsv"
+    params:
+        prefix = f"{OUT}/02_blast/db/genome",
+        evalue = config["blast_evalue"],
+        mts = config["blast_max_target_seqs"],
+        fields = "qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore"
+    conda:
+        "envs/blast.yaml"
+    threads: 4
+    log:
+        "logs/blastn.log"
+    shell:
+        """
+        mkdir -p $(dirname {output}) logs
+        blastn -task blastn \
+            -db {params.prefix} \
+            -query {input.query} \
+            -out {output} \
+            -evalue {params.evalue} \
+            -max_target_seqs {params.mts} \
+            -num_threads {threads} \
+            -outfmt "6 {params.fields}" 2> {log}
+        """
+
+# --- ETAP 5: Korekta alleli dla nici minus ---
+rule rc_alleles:
+    input:
+        f"{OUT}/03_variant/step1_core.tsv"
+    output:
+        f"{OUT}/03_variant/step2_core_rc.tsv"
+    conda:
+        "envs/python.yaml"
+    script:
+        "scripts/rc_alleles.py"
+
+# --- ETAP 6: Konwersja macierzy DArT na genotypy ---
+rule dart_genotypes:
+    input:
+        csv = config["dart_csv"]
+    output:
+        f"{OUT}/03_variant/dart_genotypes.tsv"
+    params:
+        header_row = config["dart_header_row"],
+        data_start = config["dart_data_start_row"],
+        geno_start = config["dart_genotype_start_col"]
+    conda:
+        "envs/blast.yaml"
+    shell:
+        """
+        mkdir -p $(dirname {output})
+        awk -f workflow/scripts/genotypy.awk \
+            -v header_row={params.header_row} \
+            -v data_start={params.data_start} \
+            -v geno_start={params.geno_start} \
+            {input.csv} > {output}
+        """
+
+# Rozszerzenie wlasne (nr 1): raport statystyczny z liczbami na etapach i rozkladem wariantow
+rule statystyki_raport:
+    input:
+        probes = f"{OUT}/01_extract/probes.fa",
+        snp_info = f"{OUT}/01_extract/dart_info_oneline.tsv",
+        blast_raw = f"{OUT}/02_blast/blast_raw.tsv",
+        genotypes = f"{OUT}/03_variant/dart_genotypes.tsv",
+        vcf = f"{OUT}/04_vcf/final.vcf"
+    output:
+        "raport/statystyki.md"
+    shell:
+        """
+        mkdir -p $(dirname {output})
+        n_probes=$(grep -c '^>' {input.probes})
+        n_snp_info=$(wc -l < {input.snp_info})
+        n_blast_rows=$(wc -l < {input.blast_raw})
+        n_blast_q=$(cut -f1 {input.blast_raw} | sort -u | wc -l)
+        n_geno_markers=$(( $(wc -l < {input.genotypes}) - 1 ))
+        n_vcf_vars=$(grep -vc '^#' {input.vcf})
+
+        {
+          echo "# Statystyki potoku DArT -> VCF"
+          echo ""
+          echo "| Etap / Metryka | Liczba |"
+          echo "| --- | ---: |"
+          echo "| Sondy wejsciowe (FASTA) | $n_probes |"
+          echo "| Rekordy opisu SNP | $n_snp_info |"
+          echo "| Wiersze dopasowan BLAST (raw) | $n_blast_rows |"
+          echo "| Unikalne sondy z trafieniem BLAST | $n_blast_q |"
+          echo "| Markery z genotypami (po konwersji) | $n_geno_markers |"
+          echo "| Warianty w final.vcf | $n_vcf_vars |"
+          echo ""
+          echo "## Rozklad wariantow na chromosomach / sekwencjach"
+          echo ""
+          grep -v '^#' {input.vcf} | cut -f1 | LC_ALL=C sort | uniq -c | awk '{{ printf "- **%s**: %s\\n", $2, $1 }}'
+        } > {output}
+        """
